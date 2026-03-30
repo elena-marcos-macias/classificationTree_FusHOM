@@ -1,11 +1,13 @@
 {
    "inputDataSelection" :{
-        "fileName" : "FUS_testHOM.xlsx",
+        "trainingDataFile" : "FDGHom_forfitctree_20260329.xlsx",
+        "testDataFile": "FDGHom_forfitctree_testDiet.xlsx",
         "columnCriteria" : {
                             "target_columns" : [1,22],
                             "ignore_columns" : [2,3]
                         },
         "resultsVariable" : "Death",
+        "positiveClass": "SUD",
         "catVariable" : "Genotype"
      },
     "crossValidationMethods" : {
@@ -13,12 +15,7 @@
         "nRuns" : [1000]
     },
     "outputFileNames" : {
-        "excelFileName" : "HOMModel_Errors_and_Importance.xlsx",
-        "crossValidationHistograms" : "HOMCrossValidationModels_Histograms.fig",
-        "decisionTree" : "HOMDecisionTree.pdf",
-        "predictorImportance" : "HOMPredictorImportance.fig",
-        "confusionMatrixGrouped" : "HOMConfusionMatrixGrouped.fig",
-        "confusionCharts" : "HOMConfusionCharts.fig",
-        "ROC_Curves" : "HOMCrossValidationModels_ROC.fig"
+        "excelFileName" : "FemFusHOMcTree_CVmetrics.xlsx",
+        "testExcelFile" : "FusHOMDiet_testDataset.xlsx"
     }                    
 }
