@@ -338,24 +338,39 @@ figure;
 % Helper to add padding and aligned tick marks to a histogram axes
 function styleHistogram(h, ax)
     binW = h.BinWidth;
-    ylim(ax, [0, max(h.Values) * 1.15]);                           % 15 % headroom
+    ylim(ax, [0, max(h.Values) * 1.15]);
     xlim(ax, [min(h.BinEdges) - 0.5*binW, max(h.BinEdges) + 0.5*binW]);
     xticks(ax, h.BinEdges);
 end
 
+meanErrorRate = mean(errorResults(:,1));
+meanAUC       = mean(errorResults(:,2));
+
 ax1 = subplot(1, 2, 1);
 h1  = histogram(ax1, errorResults(:,1), 'NumBins', 10);
 title(ax1, 'ErrorRate Distribution');
-%xlabel(ax1, 'Error Rate'); ylabel(ax1, 'Count');
 grid(ax1, 'on'); pbaspect(ax1, [1 1 1]);
 styleHistogram(h1, ax1);
+hold(ax1, 'on');
+xline(ax1, meanErrorRate, 'r-', 'LineWidth', 1.5, ...
+    'Label', sprintf('%.3f', meanErrorRate), ...
+    'FontSize', 7, ...
+    'LabelVerticalAlignment', 'middle', ...
+    'LabelHorizontalAlignment', 'center');
+hold(ax1, 'off');
 
 ax2 = subplot(1, 2, 2);
 h2  = histogram(ax2, errorResults(:,2), 'NumBins', 10);
 title(ax2, 'AUC Distribution');
-%xlabel(ax2, 'AUC'); ylabel(ax2, 'Count');
 grid(ax2, 'on'); pbaspect(ax2, [1 1 1]);
 styleHistogram(h2, ax2);
+hold(ax2, 'on');
+xline(ax2, meanAUC, 'r-', 'LineWidth', 1.5, ...
+    'Label', sprintf('%.3f', meanAUC), ...
+    'FontSize', 7, ...
+    'LabelVerticalAlignment', 'middle', ...
+    'LabelHorizontalAlignment', 'center');
+hold(ax2, 'off');
 
 exportgraphics(gcf, fullfile(savePath, 'Histograms.jpg'), 'Resolution', 300);
 
