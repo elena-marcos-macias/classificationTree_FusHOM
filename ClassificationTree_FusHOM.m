@@ -49,8 +49,8 @@
 %    Statistics and Machine Learning Toolbox (fitctree, perfcurve, etc.)
 %    selectColumns()  – custom helper in ./utils/
 %
-%  Author : [Your Name]
-%  Date   : [Date]
+%  Author : [Elena Marcos-Macías]
+%  Date   : [10/04/2026]
 % =========================================================================
 
 
@@ -64,46 +64,165 @@ if ~exist(savePath, 'dir')
     mkdir(savePath);
 end
 
+% --- Toolbox check --------------------------------------------------------
+% The Statistics and Machine Learning Toolbox is required. Fail early with
+% a clear message rather than crashing silently inside fitctree.
+requiredToolbox = 'Statistics and Machine Learning Toolbox';
+installedToolboxes = {ver().Name};
+if ~any(strcmp(installedToolboxes, requiredToolbox))
+    error(['Required toolbox not found: "%s".\n' ...
+           'Install it via the MATLAB Add-On Explorer before running this script.'], ...
+           requiredToolbox);
+end
+
+% --- Utility function check -----------------------------------------------
+if ~exist('selectColumns', 'file')
+    error(['selectColumns() not found on the MATLAB path.\n' ...
+           'Ensure the file exists in ./utils/ and that addpath above succeeded.\n' ...
+           'Current path entry for utils: %s'], fullfile(pwd, 'utils'));
+end
+
 
 %% ---- 2. LOAD CONFIGURATION ---------------------------------------------
-json = readstruct("data/instructionsDecisionTree.json");
+jsonPath = 'data/instructionsDecisionTree.json';
+
+% --- JSON file existence check --------------------------------------------
+if ~isfile(jsonPath)
+    error(['Configuration file not found: "%s".\n' ...
+           'Expected location: %s'], jsonPath, fullfile(pwd, jsonPath));
+end
+
+json = readstruct(jsonPath);
+
+% --- Required JSON fields check -------------------------------------------
+% Verify that all top-level blocks and critical sub-fields exist before
+% any downstream code attempts to index into them.
+requiredFields = { ...
+    'inputDataSelection', ...
+    'crossValidationMethods', ...
+    'outputFileNames'};
+
+for i = 1:numel(requiredFields)
+    if ~isfield(json, requiredFields{i})
+        error('Missing required field "%s" in JSON configuration file.', requiredFields{i});
+    end
+end
+
+requiredInputFields = {'trainingDataFile','testDataFile','positiveClass', ...
+                       'catVariable','resultsVariable','columnCriteria'};
+for i = 1:numel(requiredInputFields)
+    if ~isfield(json.inputDataSelection, requiredInputFields{i})
+        error('Missing required field "inputDataSelection.%s" in JSON.', requiredInputFields{i});
+    end
+end
+
+if ~isfield(json.inputDataSelection.columnCriteria, 'target_columns') || ...
+   ~isfield(json.inputDataSelection.columnCriteria, 'ignore_columns')
+    error('JSON field "inputDataSelection.columnCriteria" must contain "target_columns" and "ignore_columns".');
+end
+
+if ~isfield(json.crossValidationMethods, 'nFolds') || ...
+   ~isfield(json.crossValidationMethods, 'nRuns')
+    error('JSON field "crossValidationMethods" must contain "nFolds" and "nRuns".');
+end
+
+if ~isfield(json.outputFileNames, 'excelFileName') || ...
+   ~isfield(json.outputFileNames, 'testExcelFile')
+    error('JSON field "outputFileNames" must contain "excelFileName" and "testExcelFile".');
+end
 
 
 %% ---- 3. LOAD & PREPARE TRAINING DATA -----------------------------------
 % Read the training Excel file; drop any row that contains a missing value
 % (listwise deletion keeps the design matrix rectangular and consistent).
 trainingDataFile = char(json.inputDataSelection.trainingDataFile);
-T_Original = rmmissing(readtable(['./data/' trainingDataFile]));
+trainingDataPath = fullfile('./data', trainingDataFile);
 
-% Keep only the columns specified by the JSON include/exclude criteria
+% --- Training file existence check ----------------------------------------
+if ~isfile(trainingDataPath)
+    error(['Training data file not found: "%s".\n' ...
+           'Check the "trainingDataFile" field in the JSON and ensure the file\n' ...
+           'is located in the ./data/ folder.'], trainingDataPath);
+end
+
+T_Raw      = readtable(trainingDataPath);
+nMissing   = sum(any(ismissing(T_Raw), 2));
+T_Original = rmmissing(T_Raw);
+
+if nMissing > 0
+    warning('%d row(s) with missing values removed from the training set.', nMissing);
+end
+
+% --- Empty table check ----------------------------------------------------
+if isempty(T_Original)
+    error(['Training dataset is empty after removing missing values.\n' ...
+           'Check the file "%s" for data integrity.'], trainingDataPath);
+end
+
+% --- Column selection & response variable check ---------------------------
 T_Data = selectColumns(T_Original, ...
     json.inputDataSelection.columnCriteria.target_columns, ...
     json.inputDataSelection.columnCriteria.ignore_columns);
 
-catVariable       = char(json.inputDataSelection.catVariable);
-T_ResultsVariable = T_Original.(json.inputDataSelection.resultsVariable);
-nObs              = height(T_Data);
+if isempty(T_Data)
+    error(['selectColumns() returned an empty table.\n' ...
+           'Verify that "target_columns" and "ignore_columns" in the JSON\n' ...
+           'produce at least one predictor column.']);
+end
 
-% --- Positive class validation -------------------------------------------
+resultsVarName = json.inputDataSelection.resultsVariable;
+if ~ismember(resultsVarName, T_Original.Properties.VariableNames)
+    error(['Response variable "%s" not found in the training data.\n' ...
+           'Available columns: %s'], ...
+           resultsVarName, strjoin(T_Original.Properties.VariableNames, ', '));
+end
+T_ResultsVariable = T_Original.(resultsVarName);
+
+catVariable = char(json.inputDataSelection.catVariable);
+if ~ismember(catVariable, T_Data.Properties.VariableNames)
+    error(['Categorical predictor "%s" not found in the selected predictor columns.\n' ...
+           'Available predictors: %s'], ...
+           catVariable, strjoin(T_Data.Properties.VariableNames, ', '));
+end
+
+nObs = height(T_Data);
+
+% --- Positive class validation --------------------------------------------
 % The positive class is declared explicitly in the JSON instead of being
 % inferred automatically (e.g. as the minority class), so that ROC
 % orientation is deterministic across runs and data subsets.
 positiveClass = string(json.inputDataSelection.positiveClass);
 classNames    = unique(string(T_ResultsVariable));
 
+if numel(classNames) < 2
+    error(['Only one class found in the response variable ("%s").\n' ...
+           'A binary or multi-class response with at least 2 classes is required.'], ...
+           classNames(1));
+end
+
 if ~any(classNames == positiveClass)
-    error(['Positive class "%s" not found in the response variable. ' ...
+    error(['Positive class "%s" not found in the response variable.\n' ...
            'Available classes: %s'], positiveClass, strjoin(classNames, ', '));
 end
 
 negativeClasses = classNames(classNames ~= positiveClass);
-fprintf('Positive class : %s\n',         positiveClass);
-fprintf('Negative class : %s\n',         strjoin(negativeClasses, ', '));
-fprintf('Total samples  : %d\n\n',       nObs);
+fprintf('Positive class : %s\n',   positiveClass);
+fprintf('Negative class : %s\n',   strjoin(negativeClasses, ', '));
+fprintf('Total samples  : %d\n\n', nObs);
 
 % Binary ground-truth vector used for perfcurve (true = positive class)
 trueLabels = string(T_ResultsVariable);
 trueBinary = (trueLabels == positiveClass);
+
+% --- Class balance warning ------------------------------------------------
+posCount = sum(trueBinary);
+negCount = nObs - posCount;
+minorRatio = min(posCount, negCount) / nObs;
+if minorRatio < 0.15
+    warning(['Severe class imbalance detected: %d positive vs %d negative samples (%.1f %% minority).\n' ...
+             'Consider oversampling, undersampling, or cost-sensitive learning.'], ...
+             posCount, negCount, 100 * minorRatio);
+end
 
 
 %% ---- 4. FULL-MODEL DECISION TREE (visualisation + global importance) ---
@@ -130,10 +249,15 @@ set(allText, 'FontSize', 18);          % increase as desired (default ≈ 8–9)
 drawnow;                               % reflow layout after font change
 
 % --- Export as JPG only --------------------------------------------------
-exportgraphics(treeFigRaster, fullfile(savePath, 'DecisionTree.jpg'), ...
-    'Resolution', 300);
+treeJpgPath = fullfile(savePath, 'DecisionTree.jpg');
+exportgraphics(treeFigRaster, treeJpgPath, 'Resolution', 300);
 
-fprintf('Tree exported: DecisionTree.jpg\n');
+% --- Export verification --------------------------------------------------
+if ~isfile(treeJpgPath)
+    warning('DecisionTree.jpg was not found after export — check disk space and write permissions.');
+else
+    fprintf('Tree exported: DecisionTree.jpg\n');
+end
 close(treeFigRaster);
 
 % --- Predictor importance bar chart (full model) -------------------------
@@ -151,9 +275,24 @@ ylabel('Importance Score');
 PredictorImportanceTable = table(predictorNames', imp', ...
     'VariableNames', {'Predictor', 'Importance'});
 
+
 %% ---- 5. CROSS-VALIDATION SETUP -----------------------------------------
 nFolds = json.crossValidationMethods.nFolds;
 nRuns  = json.crossValidationMethods.nRuns;
+
+% --- CV parameter validation ----------------------------------------------
+if ~isnumeric(nFolds) || ~isscalar(nFolds) || nFolds < 2 || nFolds ~= floor(nFolds)
+    error('"nFolds" must be a positive integer >= 2. Received: %s', mat2str(nFolds));
+end
+
+if ~isnumeric(nRuns) || ~isscalar(nRuns) || nRuns < 1 || nRuns ~= floor(nRuns)
+    error('"nRuns" must be a positive integer >= 1. Received: %s', mat2str(nRuns));
+end
+
+if nFolds > nObs
+    error(['"nFolds" (%d) cannot exceed the number of observations (%d).\n' ...
+           'Reduce nFolds or provide more data.'], nFolds, nObs);
+end
 
 % Approximate train / held-out split per fold (may differ by ±1 sample
 % when nObs is not evenly divisible by nFolds)
@@ -200,18 +339,31 @@ for run = 1:nRuns
     [~, Score]    = kfoldPredict(CVMdl);  % out-of-fold predicted scores
     missClassRate = kfoldLoss(CVMdl);     % out-of-fold error rate
 
+    % --- Score matrix sanity check ----------------------------------------
+    if size(Score, 2) < 2
+        error(['kfoldPredict returned a score matrix with fewer than 2 columns (run %d).\n' ...
+               'This may indicate a degenerate fold where only one class is present.\n' ...
+               'Try increasing nFolds or the dataset size.'], run);
+    end
+
     % Locate the positive class column in the score matrix.
     % Computed once per run because CVMdl.ClassNames is consistent within a
     % run (MATLAB preserves the training-data class order).
     cvClassNames = string(CVMdl.ClassNames);
     posClassIdx  = find(cvClassNames == positiveClass, 1);
     if isempty(posClassIdx)
-        error(['Positive class "%s" not found in CVMdl.ClassNames (run %d). ' ...
-               'Verify the JSON label matches the data exactly.'], ...
-               positiveClass, run);
+        error(['Positive class "%s" not found in CVMdl.ClassNames (run %d).\n' ...
+               'Verify the JSON label matches the data exactly.\n' ...
+               'Classes found: %s'], ...
+               positiveClass, run, strjoin(cvClassNames, ', '));
     end
 
     [fp, tp, ~, auc] = perfcurve(trueBinary, Score(:, posClassIdx), true);
+
+    % --- AUC range check --------------------------------------------------
+    if auc < 0 || auc > 1
+        warning('Unexpected AUC value %.4f in run %d. Expected range [0, 1].', auc, run);
+    end
 
     errorResults(run, :) = [missClassRate, auc];
     FPAll{run} = fp(:);
@@ -228,11 +380,21 @@ for run = 1:nRuns
         cvTree    = CVMdl.Trained{fold};
         partition = CVMdl.Partition;
 
+        % --- CV tree integrity check --------------------------------------
+        if isempty(cvTree)
+            error('CVMdl.Trained{%d} is empty in run %d. Training may have failed.', fold, run);
+        end
+
         % Derive actual (not approximate) train / test counts from the
         % partition object so per-tree metadata is exact.
         testIdx      = test(partition, fold);
         nTestActual  = sum(testIdx);
         nTrainActual = nObs - nTestActual;
+
+        % --- Fold size check ----------------------------------------------
+        if nTestActual == 0
+            error('Fold %d in run %d has zero test samples. Check data size vs nFolds.', fold, run);
+        end
 
         CVTreeImportanceRaw(treeCounter, :) = predictorImportance(cvTree);
         CVTreeRunID(treeCounter)            = run;
@@ -240,6 +402,13 @@ for run = 1:nRuns
         CVTreeTrainSize(treeCounter)        = nTrainActual;
         CVTreeTestSize(treeCounter)         = nTestActual;
     end
+end
+
+% --- Post-loop CV results check -------------------------------------------
+if all(AUCs == 0)
+    warning(['All AUC values are 0. This is very unusual.\n' ...
+             'Check that the positive class label in the JSON ("%s") exactly\n' ...
+             'matches the values in the response column (case-sensitive).'], positiveClass);
 end
 
 
@@ -253,8 +422,8 @@ CVTreeImportanceTable = array2table( ...
 % --- Summary statistics across all nRuns × nFolds training trees ---------
 meanImpCV = mean(CVTreeImportanceRaw, 1);
 stdImpCV  = std(CVTreeImportanceRaw,  0, 1);
-medImpCV   = median(CVTreeImportanceRaw, 1);
-usageRate  = mean(CVTreeImportanceRaw > 0, 1);
+medImpCV  = median(CVTreeImportanceRaw, 1);
+usageRate = mean(CVTreeImportanceRaw > 0, 1);
 
 minImpCV = min(CVTreeImportanceRaw, [], 1);
 maxImpCV = max(CVTreeImportanceRaw, [], 1);
@@ -319,17 +488,24 @@ ErrorTable = table(errorCol, aucCol, ...
 %% ---- 10. EXPORT TO EXCEL ------------------------------------------------
 excelFileName = fullfile(savePath, char(json.outputFileNames.excelFileName));
 
-writetable(ErrorTable,               excelFileName, 'Sheet','Errors',              'WriteRowNames', true);
-writetable(PredictorImportanceTable, excelFileName, 'Sheet','PredictorImportance');
-writetable(CVTreeImportanceTable,    excelFileName, 'Sheet','CVTreeImportance');
-writetable(CVTreeSummaryTable,       excelFileName, 'Sheet','CVTreeSummary',      'WriteRowNames', true);
+% --- Excel write with verification ----------------------------------------
+try
+    writetable(ErrorTable,               excelFileName, 'Sheet','Errors',             'WriteRowNames', true);
+    writetable(PredictorImportanceTable, excelFileName, 'Sheet','PredictorImportance');
+    writetable(CVTreeImportanceTable,    excelFileName, 'Sheet','CVTreeImportance');
+    writetable(CVTreeSummaryTable,       excelFileName, 'Sheet','CVTreeSummary',       'WriteRowNames', true);
+    writecell(CVTreeSummaryValuesRange,  excelFileName, 'Sheet','CVTreeSummary',       'Range','A6');
+catch ME
+    error(['Failed to write Excel file "%s".\n' ...
+           'Possible causes: file is open in Excel, insufficient disk space, or bad path.\n' ...
+           'MATLAB error: %s'], excelFileName, ME.message);
+end
 
-% Write the cell row immediately after the table:
-% Row 1 = header, rows 2-5 = Mean / SD / Median / UsageRate, so A6 is the next row.
-writecell(CVTreeSummaryValuesRange, excelFileName, ...
-    'Sheet', 'CVTreeSummary', 'Range', 'A6');
-
-fprintf('Results exported to: %s\n', excelFileName);
+if ~isfile(excelFileName)
+    warning('Excel file not found after write attempt: %s', excelFileName);
+else
+    fprintf('Results exported to: %s\n', excelFileName);
+end
 
 
 %% ---- 11. HISTOGRAMS (error rate & AUC distributions) -------------------
@@ -372,7 +548,11 @@ xline(ax2, meanAUC, 'r-', 'LineWidth', 1.5, ...
     'LabelHorizontalAlignment', 'center');
 hold(ax2, 'off');
 
-exportgraphics(gcf, fullfile(savePath, 'Histograms.jpg'), 'Resolution', 300);
+histPath = fullfile(savePath, 'Histograms.jpg');
+exportgraphics(gcf, histPath, 'Resolution', 300);
+if ~isfile(histPath)
+    warning('Histograms.jpg was not found after export.');
+end
 
 
 %% ---- 12. ROC CURVES -----------------------------------------------------
@@ -390,6 +570,13 @@ for run = 1:nRuns
 
     [fpUniq, ia] = unique(fp, 'sorted');  % deduplicate for interp1
     tpUniq       = tp(ia);
+
+    % --- Interpolation input check ----------------------------------------
+    if numel(fpUniq) < 2
+        warning('Run %d: insufficient unique FPR points for interpolation. ROC curve may be unreliable.', run);
+        tprGridAll(:, run) = zeros(numel(fprGrid), 1);
+        continue;
+    end
 
     tprGridAll(:, run) = max(0, min(1, interp1(fpUniq, tpUniq, fprGrid, 'linear')));
 end
@@ -416,30 +603,72 @@ xlabel('FPR');
 ylabel('TPR');
 title('ROC Curves — Repeated CV');
 
-exportgraphics(gcf, fullfile(savePath, 'ROCcurves.jpg'), 'Resolution', 300);
+rocPath = fullfile(savePath, 'ROCcurves.jpg');
+exportgraphics(gcf, rocPath, 'Resolution', 300);
 fprintf('\nAll figures and tables saved to: %s\n', savePath);
 
 
 %% ---- 13. EXTERNAL TEST SET EVALUATION -----------------------------------
-testDataFile   = char(json.inputDataSelection.testDataFile);
-T_TestOriginal = rmmissing(readtable(['./data/' testDataFile]));
+testDataFile  = char(json.inputDataSelection.testDataFile);
+testDataPath  = fullfile('./data', testDataFile);
+
+% --- Test file existence check --------------------------------------------
+if ~isfile(testDataPath)
+    error(['Test data file not found: "%s".\n' ...
+           'Check the "testDataFile" field in the JSON and ensure the file\n' ...
+           'is located in the ./data/ folder.'], testDataPath);
+end
+
+T_TestRaw      = readtable(testDataPath);
+nMissingTest   = sum(any(ismissing(T_TestRaw), 2));
+T_TestOriginal = rmmissing(T_TestRaw);
+
+if nMissingTest > 0
+    warning('%d row(s) with missing values removed from the test set.', nMissingTest);
+end
 
 if isempty(T_TestOriginal)
-    error('Test dataset is empty after loading/rmmissing(). Check the file: %s', testDataFile);
+    error(['Test dataset is empty after removing missing values.\n' ...
+           'Check the file: %s'], testDataPath);
+end
+
+% --- Test response variable check -----------------------------------------
+if ~ismember(resultsVarName, T_TestOriginal.Properties.VariableNames)
+    error(['Response variable "%s" not found in the test data.\n' ...
+           'Available columns: %s'], ...
+           resultsVarName, strjoin(T_TestOriginal.Properties.VariableNames, ', '));
 end
 
 % Apply the same column-selection logic used on the training set
-T_TestData          = selectColumns(T_TestOriginal, ...
+T_TestData            = selectColumns(T_TestOriginal, ...
     json.inputDataSelection.columnCriteria.target_columns, ...
     json.inputDataSelection.columnCriteria.ignore_columns);
-T_TestResultsVariable = T_TestOriginal.(json.inputDataSelection.resultsVariable);
+T_TestResultsVariable = T_TestOriginal.(resultsVarName);
 
 if isempty(T_TestResultsVariable)
-    error('Test labels are empty. Check resultsVariable in JSON or the test file.');
+    error('Test labels are empty after column selection. Check resultsVariable in JSON or the test file.');
+end
+
+% --- Test predictor column consistency check ------------------------------
+trainPredictors = T_Data.Properties.VariableNames;
+testPredictors  = T_TestData.Properties.VariableNames;
+missingCols     = setdiff(trainPredictors, testPredictors);
+if ~isempty(missingCols)
+    error(['Test data is missing predictor column(s) present in training data:\n  %s\n' ...
+           'Ensure both files share the same column structure.'], ...
+           strjoin(missingCols, ', '));
 end
 
 testLabelsTrue = string(T_TestResultsVariable);
 testBinary     = (testLabelsTrue == positiveClass);  % binary ground truth
+
+% --- Test set class presence warning --------------------------------------
+testClassNames = unique(testLabelsTrue);
+if ~any(testClassNames == positiveClass)
+    warning(['Positive class "%s" does not appear in the test set.\n' ...
+             'AUC will be undefined. Test classes found: %s'], ...
+             positiveClass, strjoin(testClassNames, ', '));
+end
 
 fprintf('\n===== TEST SET CLASS DISTRIBUTION =====\n');
 disp(tabulate(testLabelsTrue));
@@ -447,6 +676,11 @@ disp(tabulate(testLabelsTrue));
 % --- Predict with the full model -----------------------------------------
 [testPredLabels, testScores] = predict(Mdl, T_TestData);
 testPredLabels = string(testPredLabels);
+
+% --- Score matrix check ---------------------------------------------------
+if isempty(testScores) || size(testScores, 1) ~= height(T_TestData)
+    error('predict() returned an unexpected score matrix size for the test set.');
+end
 
 % --- Error rate -----------------------------------------------------------
 testErrorRate = mean(testPredLabels ~= testLabelsTrue);
@@ -497,13 +731,20 @@ title('ROC Curve — External Test Set');
 legend({legText, 'Random'}, 'Location', 'SouthEast');
 exportgraphics(gcf, fullfile(savePath, 'ROC_TestSet.jpg'), 'Resolution', 300);
 
-% --- Export to Excel (new file) -----------------------------------------
-testExcelFile = fullfile(savePath, char(json.outputFileNames.testExcelFile)); % call the new excel file
+% --- Export to Excel (new file) ------------------------------------------
+testExcelFile = fullfile(savePath, char(json.outputFileNames.testExcelFile));
 
 TestResultsTable = table(testErrorRate, aucTest, ...
     'VariableNames', {'Error','AUC'}, ...
     'RowNames',      {'ExternalTest'});
-writetable(TestResultsTable, testExcelFile, ...
-    'Sheet', 'ExternalTest', 'WriteRowNames', true);
+
+try
+    writetable(TestResultsTable, testExcelFile, ...
+        'Sheet', 'ExternalTest', 'WriteRowNames', true);
+catch ME
+    error(['Failed to write test results Excel file "%s".\n' ...
+           'Possible causes: file is open in Excel, insufficient disk space, or bad path.\n' ...
+           'MATLAB error: %s'], testExcelFile, ME.message);
+end
 
 fprintf('External test results saved.\n');
