@@ -243,7 +243,7 @@ If you use this code in your research, please cite the repository:
 
 ```
 Marcos-Macías, E. (2026). Decision Tree Classifier with Repeated K-Fold Cross-Validation [MATLAB].
-GitHub. https://github.com/your-username/your-repo-name
+GitHub. https://github.com/elena-marcos-macias/classificationTree_FusHOM.git
 ```
 
 ---
