@@ -32,17 +32,17 @@
 %
 %  OUTPUTS (saved to ./results/)
 %  -------
-%    decisionTree.*          – Full-model tree graph (vector PDF or SVG)
+%    DecisionTree.jpg        – Full-model tree graph (300 dpi raster)
 %    <excelFileName>.xlsx
 %      · Errors              – Mean, SD, best, worst, median CV metrics
 %      · PredictorImportance – Gini importance from the full model
 %      · CVTreeImportance    – Importance from every CV training tree
 %      · CVTreeSummary       – Aggregate stats across all CV trees
-%      · ExternalTest        – Error rate + AUC on the held-out test file
+%      · AUC_CI              – Mean AUC and 95 % CI from repeated CV
+%      · AUC_CV_Distribution – Raw AUC values across all runs
 %    Histograms.jpg          – Error-rate and AUC distributions across runs
 %    ROCcurves.jpg           – Best / median / mean / worst ROC curves
-%    Confusion_TestSet.jpg   – Confusion matrix for the external test set
-%    ROC_TestSet.jpg         – ROC curve for the external test set
+%    AUC_CV_Distribution.jpg – Bootstrap-style AUC distribution with 95 % CI
 %
 %  DEPENDENCIES
 %  ------------
@@ -50,7 +50,7 @@
 %    selectColumns()  – custom helper in ./utils/
 %
 %  Author : [Elena Marcos-Macías]
-%  Date   : [10/04/2026]
+%  Date   : [19/05/2026]
 % =========================================================================
 
 
@@ -330,6 +330,9 @@ for run = 1:nRuns
     % fitctree with 'KFold' internally builds nFolds trees, each trained
     % on (k-1) folds and tested on the remaining fold. It does NOT train a
     % single model — CVMdl is a container of k training trees.
+    % Class stratification is intentionally NOT enforced so that fold
+    % composition reflects the natural class distribution of the data,
+    % which may differ from 50/50 in real experimental conditions.
     CVMdl = fitctree(T_Data, T_ResultsVariable, ...
         'KFold',                nFolds, ...
         'CategoricalPredictors',{catVariable}, ...
@@ -356,6 +359,20 @@ for run = 1:nRuns
                'Verify the JSON label matches the data exactly.\n' ...
                'Classes found: %s'], ...
                positiveClass, run, strjoin(cvClassNames, ', '));
+    end
+
+    % --- Degenerate run check ---------------------------------------------
+    % Without enforced stratification, occasional runs may produce a fold
+    % where all held-out samples belong to the same class. perfcurve would
+    % still compute a value but the AUC would be uninformative. Detect this
+    % condition and skip the run rather than letting it silently bias the
+    % results.
+    predictedLabels = string(kfoldPredict(CVMdl));
+    if numel(unique(predictedLabels)) < 2
+        warning(['Run %d skipped: out-of-fold predictions contain only one class.\n' ...
+                 'This can occur without stratification when class distribution\n' ...
+                 'is unequal. Consider increasing nFolds or nRuns to compensate.'], run);
+        continue;
     end
 
     [fp, tp, ~, auc] = perfcurve(trueBinary, Score(:, posClassIdx), true);
@@ -405,11 +422,34 @@ for run = 1:nRuns
 end
 
 % --- Post-loop CV results check -------------------------------------------
+% Remove preallocated zero rows corresponding to skipped runs before
+% computing summary statistics. A run is considered skipped if its AUC
+% was never written (remains 0 AND errorResults row is also 0).
+skippedRuns = (AUCs == 0) & (errorResults(:,1) == 0);
+if any(skippedRuns)
+    warning('%d run(s) were skipped due to degenerate folds and excluded from results.', ...
+            sum(skippedRuns));
+    AUCs         = AUCs(~skippedRuns);
+    errorResults = errorResults(~skippedRuns, :);
+    FPAll        = FPAll(~skippedRuns);
+    TPAll        = TPAll(~skippedRuns);
+end
+
+if isempty(AUCs)
+    error(['All CV runs were skipped. No valid AUC values available.\n' ...
+           'Check class distribution and consider increasing nFolds.']);
+end
+
 if all(AUCs == 0)
     warning(['All AUC values are 0. This is very unusual.\n' ...
              'Check that the positive class label in the JSON ("%s") exactly\n' ...
              'matches the values in the response column (case-sensitive).'], positiveClass);
 end
+
+% Update nRuns to reflect the actual number of valid runs used
+nRuns = numel(AUCs);
+fprintf('\nValid runs used for analysis: %d\n', nRuns);
+
 
 
 %% ---- 7. CV-TREE IMPORTANCE TABLES ---------------------------------------
@@ -607,144 +647,214 @@ rocPath = fullfile(savePath, 'ROCcurves.jpg');
 exportgraphics(gcf, rocPath, 'Resolution', 300);
 fprintf('\nAll figures and tables saved to: %s\n', savePath);
 
+%% ---- 13. 95 % CONFIDENCE INTERVAL FOR AUC (from repeated CV runs) ------
+% With nRuns repeated k-fold CV already completed in Section 6, the vector
+% AUCs contains one empirical AUC per run. Each run uses a different random
+% partition, so these values are approximately independent estimates of the
+% model's true generalisation AUC.
+%
+% The 95 % CI is computed as the 2.5th and 97.5th percentiles of that
+% distribution — equivalent to a percentile bootstrap where the "resampling"
+% is the repeated CV itself. No additional model fitting is required.
+%
+% This approach is preferred over pooling out-of-fold predictions across
+% runs when nRuns is large (e.g. 1000), because pooling inflates the
+% effective sample size and produces an artificially narrow interval.
 
-%% ---- 13. EXTERNAL TEST SET EVALUATION -----------------------------------
-testDataFile  = char(json.inputDataSelection.testDataFile);
-testDataPath  = fullfile('./data', testDataFile);
+CI_lower = prctile(AUCs, 2.5);
+CI_upper = prctile(AUCs, 97.5);
+CI_mean  = mean(AUCs);
 
-% --- Test file existence check --------------------------------------------
-if ~isfile(testDataPath)
-    error(['Test data file not found: "%s".\n' ...
-           'Check the "testDataFile" field in the JSON and ensure the file\n' ...
-           'is located in the ./data/ folder.'], testDataPath);
-end
+fprintf('\n===== 95 %% CI FOR AUC (repeated CV) =====\n');
+fprintf('Runs used  : %d\n',         nRuns);
+fprintf('Mean AUC   : %.4f\n',       CI_mean);
+fprintf('95 %% CI   : [%.4f, %.4f]\n\n', CI_lower, CI_upper);
 
-T_TestRaw      = readtable(testDataPath);
-nMissingTest   = sum(any(ismissing(T_TestRaw), 2));
-T_TestOriginal = rmmissing(T_TestRaw);
-
-if nMissingTest > 0
-    warning('%d row(s) with missing values removed from the test set.', nMissingTest);
-end
-
-if isempty(T_TestOriginal)
-    error(['Test dataset is empty after removing missing values.\n' ...
-           'Check the file: %s'], testDataPath);
-end
-
-% --- Test response variable check -----------------------------------------
-if ~ismember(resultsVarName, T_TestOriginal.Properties.VariableNames)
-    error(['Response variable "%s" not found in the test data.\n' ...
-           'Available columns: %s'], ...
-           resultsVarName, strjoin(T_TestOriginal.Properties.VariableNames, ', '));
-end
-
-% Apply the same column-selection logic used on the training set
-T_TestData            = selectColumns(T_TestOriginal, ...
-    json.inputDataSelection.columnCriteria.target_columns, ...
-    json.inputDataSelection.columnCriteria.ignore_columns);
-T_TestResultsVariable = T_TestOriginal.(resultsVarName);
-
-if isempty(T_TestResultsVariable)
-    error('Test labels are empty after column selection. Check resultsVariable in JSON or the test file.');
-end
-
-% --- Test predictor column consistency check ------------------------------
-trainPredictors = T_Data.Properties.VariableNames;
-testPredictors  = T_TestData.Properties.VariableNames;
-missingCols     = setdiff(trainPredictors, testPredictors);
-if ~isempty(missingCols)
-    error(['Test data is missing predictor column(s) present in training data:\n  %s\n' ...
-           'Ensure both files share the same column structure.'], ...
-           strjoin(missingCols, ', '));
-end
-
-testLabelsTrue = string(T_TestResultsVariable);
-testBinary     = (testLabelsTrue == positiveClass);  % binary ground truth
-
-% --- Test set class presence warning --------------------------------------
-testClassNames = unique(testLabelsTrue);
-if ~any(testClassNames == positiveClass)
-    warning(['Positive class "%s" does not appear in the test set.\n' ...
-             'AUC will be undefined. Test classes found: %s'], ...
-             positiveClass, strjoin(testClassNames, ', '));
-end
-
-fprintf('\n===== TEST SET CLASS DISTRIBUTION =====\n');
-disp(tabulate(testLabelsTrue));
-
-% --- Predict with the full model -----------------------------------------
-[testPredLabels, testScores] = predict(Mdl, T_TestData);
-testPredLabels = string(testPredLabels);
-
-% --- Score matrix check ---------------------------------------------------
-if isempty(testScores) || size(testScores, 1) ~= height(T_TestData)
-    error('predict() returned an unexpected score matrix size for the test set.');
-end
-
-% --- Error rate -----------------------------------------------------------
-testErrorRate = mean(testPredLabels ~= testLabelsTrue);
-
-% --- AUC ------------------------------------------------------------------
-% Guard against a degenerate test set that contains only one class
-% (perfcurve would crash; AUC is mathematically undefined in that case).
-if numel(unique(testBinary)) < 2
-    warning('Test set contains only one class — AUC is undefined.');
-    fpTest = []; tpTest = []; aucTest = NaN;
-else
-    mdlClassNames = string(Mdl.ClassNames);
-    posClassIdx   = find(mdlClassNames == positiveClass, 1);
-    if isempty(posClassIdx)
-        error('Positive class "%s" not found in Mdl.ClassNames.', positiveClass);
-    end
-    [fpTest, tpTest, ~, aucTest] = perfcurve(testBinary, testScores(:, posClassIdx), true);
-end
-
-% --- Report results -------------------------------------------------------
-fprintf('\n===== EXTERNAL TEST SET RESULTS =====\n');
-fprintf('Test samples : %d\n',   numel(testLabelsTrue));
-fprintf('Error rate   : %.4f\n', testErrorRate);
-if isnan(aucTest)
-    fprintf('AUC          : undefined (single class in test set)\n\n');
-else
-    fprintf('AUC          : %.4f\n\n', aucTest);
-end
-
-% --- Confusion matrix -----------------------------------------------------
-figure;
-confusionchart(testLabelsTrue, testPredLabels);
-title('External Test Set — Confusion Matrix');
-exportgraphics(gcf, fullfile(savePath, 'Confusion_TestSet.jpg'), 'Resolution', 300);
-
-% --- ROC curve ------------------------------------------------------------
-figure; hold on; grid on;
-if ~isempty(fpTest)
-    plot(fpTest, tpTest, 'LineWidth', 2);
-    legText = sprintf('Test ROC (AUC = %.3f)', aucTest);
-else
-    legText = 'Test ROC (AUC undefined)';
-end
-plot([0 1], [0 1], 'k--', 'LineWidth', 0.5);
-xlabel('False Positive Rate (FPR)');
-ylabel('True Positive Rate (TPR)');
-title('ROC Curve — External Test Set');
-legend({legText, 'Random'}, 'Location', 'SouthEast');
-exportgraphics(gcf, fullfile(savePath, 'ROC_TestSet.jpg'), 'Resolution', 300);
-
-% --- Export to Excel (new file) ------------------------------------------
-testExcelFile = fullfile(savePath, char(json.outputFileNames.testExcelFile));
-
-TestResultsTable = table(testErrorRate, aucTest, ...
-    'VariableNames', {'Error','AUC'}, ...
-    'RowNames',      {'ExternalTest'});
+% --- Export to Excel ------------------------------------------------------
+CISummaryTable = table([CI_mean; CI_lower; CI_upper], ...
+    'VariableNames', {'Value'}, ...
+    'RowNames',      {'MeanAUC', 'CI_Lower_2p5', 'CI_Upper_97p5'});
 
 try
-    writetable(TestResultsTable, testExcelFile, ...
-        'Sheet', 'ExternalTest', 'WriteRowNames', true);
+    writetable(CISummaryTable, excelFileName, ...
+        'Sheet', 'AUC_CI', 'WriteRowNames', true);
 catch ME
-    error(['Failed to write test results Excel file "%s".\n' ...
-           'Possible causes: file is open in Excel, insufficient disk space, or bad path.\n' ...
-           'MATLAB error: %s'], testExcelFile, ME.message);
+    error(['Failed to write CI results to Excel file "%s".\n' ...
+           'MATLAB error: %s'], excelFileName, ME.message);
 end
 
-fprintf('External test results saved.\n');
+% --- Plot distribution of AUCs across runs --------------------------------
+figure;
+histogram(AUCs, 'NumBins', 40, 'Normalization', 'count');
+hold on;
+xline(CI_lower, 'r--', 'LineWidth', 1.5, ...
+    'Label', sprintf('2.5%%  %.3f', CI_lower), ...
+    'FontSize', 8, 'LabelVerticalAlignment', 'middle');
+xline(CI_upper, 'r--', 'LineWidth', 1.5, ...
+    'Label', sprintf('97.5%% %.3f', CI_upper), ...
+    'FontSize', 8, 'LabelVerticalAlignment', 'middle');
+xline(CI_mean,  'k-',  'LineWidth', 1.5, ...
+    'Label', sprintf('Mean  %.3f', CI_mean), ...
+    'FontSize', 8, 'LabelVerticalAlignment', 'middle');
+hold off;
+title('AUC Distribution across Repeated CV Runs (95 % CI)');
+xlabel('AUC');
+ylabel('Count');
+grid on;
+
+AUCDistPath = fullfile(savePath, 'AUC_CV_Distribution.jpg');
+exportgraphics(gcf, AUCDistPath, 'Resolution', 300);
+
+if ~isfile(AUCDistPath)
+    warning('AUC_CV_Distribution.jpg was not found after export.');
+else
+    fprintf('AUC distribution figure saved: AUC_CV_Distribution.jpg\n');
+end
+
+
+%% ---- 14. EXTERNAL TEST SET EVALUATION (optional) -----------------------
+% This section evaluates the full model on an independent held-out test set
+% if one is available. If the file specified in "testDataFile" does not
+% exist, the section is skipped with a warning and no error is raised.
+%
+% NOTE: In the current study no independent test set is available. This
+% section is retained for completeness and future use, but will not execute.
+testDataFile = char(json.inputDataSelection.testDataFile);
+testDataPath = fullfile('./data', testDataFile);
+
+if ~isfile(testDataPath)
+    warning(['Test data file not found: "%s".\n' ...
+             'Skipping external test set evaluation (Section 14).'], testDataPath);
+else
+
+    T_TestRaw      = readtable(testDataPath);
+    nMissingTest   = sum(any(ismissing(T_TestRaw), 2));
+    T_TestOriginal = rmmissing(T_TestRaw);
+
+    if nMissingTest > 0
+        warning('%d row(s) with missing values removed from the test set.', nMissingTest);
+    end
+
+    if isempty(T_TestOriginal)
+        error(['Test dataset is empty after removing missing values.\n' ...
+               'Check the file: %s'], testDataPath);
+    end
+
+    % --- Test response variable check -------------------------------------
+    if ~ismember(resultsVarName, T_TestOriginal.Properties.VariableNames)
+        error(['Response variable "%s" not found in the test data.\n' ...
+               'Available columns: %s'], ...
+               resultsVarName, strjoin(T_TestOriginal.Properties.VariableNames, ', '));
+    end
+
+    % Apply the same column-selection logic used on the training set
+    T_TestData            = selectColumns(T_TestOriginal, ...
+        json.inputDataSelection.columnCriteria.target_columns, ...
+        json.inputDataSelection.columnCriteria.ignore_columns);
+    T_TestResultsVariable = T_TestOriginal.(resultsVarName);
+
+    if isempty(T_TestResultsVariable)
+        error('Test labels are empty after column selection. Check resultsVariable in JSON or the test file.');
+    end
+
+    % --- Test predictor column consistency check --------------------------
+    trainPredictors = T_Data.Properties.VariableNames;
+    testPredictors  = T_TestData.Properties.VariableNames;
+    missingCols     = setdiff(trainPredictors, testPredictors);
+    if ~isempty(missingCols)
+        error(['Test data is missing predictor column(s) present in training data:\n  %s\n' ...
+               'Ensure both files share the same column structure.'], ...
+               strjoin(missingCols, ', '));
+    end
+
+    testLabelsTrue = string(T_TestResultsVariable);
+    testBinary     = (testLabelsTrue == positiveClass);
+
+    % --- Test set class presence warning ----------------------------------
+    testClassNames = unique(testLabelsTrue);
+    if ~any(testClassNames == positiveClass)
+        warning(['Positive class "%s" does not appear in the test set.\n' ...
+                 'AUC will be undefined. Test classes found: %s'], ...
+                 positiveClass, strjoin(testClassNames, ', '));
+    end
+
+    fprintf('\n===== TEST SET CLASS DISTRIBUTION =====\n');
+    disp(tabulate(testLabelsTrue));
+
+    % --- Predict with the full model --------------------------------------
+    [testPredLabels, testScores] = predict(Mdl, T_TestData);
+    testPredLabels = string(testPredLabels);
+
+    % --- Score matrix check -----------------------------------------------
+    if isempty(testScores) || size(testScores, 1) ~= height(T_TestData)
+        error('predict() returned an unexpected score matrix size for the test set.');
+    end
+
+    % --- Error rate -------------------------------------------------------
+    testErrorRate = mean(testPredLabels ~= testLabelsTrue);
+
+    % --- AUC --------------------------------------------------------------
+    % Guard against a degenerate test set that contains only one class
+    % (perfcurve would crash; AUC is mathematically undefined in that case).
+    if numel(unique(testBinary)) < 2
+        warning('Test set contains only one class — AUC is undefined.');
+        fpTest = []; tpTest = []; aucTest = NaN;
+    else
+        mdlClassNames = string(Mdl.ClassNames);
+        posClassIdx   = find(mdlClassNames == positiveClass, 1);
+        if isempty(posClassIdx)
+            error('Positive class "%s" not found in Mdl.ClassNames.', positiveClass);
+        end
+        [fpTest, tpTest, ~, aucTest] = perfcurve(testBinary, testScores(:, posClassIdx), true);
+    end
+
+    % --- Report results ---------------------------------------------------
+    fprintf('\n===== EXTERNAL TEST SET RESULTS =====\n');
+    fprintf('Test samples : %d\n',   numel(testLabelsTrue));
+    fprintf('Error rate   : %.4f\n', testErrorRate);
+    if isnan(aucTest)
+        fprintf('AUC          : undefined (single class in test set)\n\n');
+    else
+        fprintf('AUC          : %.4f\n\n', aucTest);
+    end
+
+    % --- Confusion matrix -------------------------------------------------
+    figure;
+    confusionchart(testLabelsTrue, testPredLabels);
+    title('External Test Set — Confusion Matrix');
+    exportgraphics(gcf, fullfile(savePath, 'Confusion_TestSet.jpg'), 'Resolution', 300);
+
+    % --- ROC curve --------------------------------------------------------
+    figure; hold on; grid on;
+    if ~isempty(fpTest)
+        plot(fpTest, tpTest, 'LineWidth', 2);
+        legText = sprintf('Test ROC (AUC = %.3f)', aucTest);
+    else
+        legText = 'Test ROC (AUC undefined)';
+    end
+    plot([0 1], [0 1], 'k--', 'LineWidth', 0.5);
+    xlabel('False Positive Rate (FPR)');
+    ylabel('True Positive Rate (TPR)');
+    title('ROC Curve — External Test Set');
+    legend({legText, 'Random'}, 'Location', 'SouthEast');
+    exportgraphics(gcf, fullfile(savePath, 'ROC_TestSet.jpg'), 'Resolution', 300);
+
+    % --- Export to Excel --------------------------------------------------
+    testExcelFile = fullfile(savePath, char(json.outputFileNames.testExcelFile));
+
+    TestResultsTable = table(testErrorRate, aucTest, ...
+        'VariableNames', {'Error','AUC'}, ...
+        'RowNames',      {'ExternalTest'});
+
+    try
+        writetable(TestResultsTable, testExcelFile, ...
+            'Sheet', 'ExternalTest', 'WriteRowNames', true);
+    catch ME
+        error(['Failed to write test results Excel file "%s".\n' ...
+               'Possible causes: file is open in Excel, insufficient disk space, or bad path.\n' ...
+               'MATLAB error: %s'], testExcelFile, ME.message);
+    end
+
+    fprintf('External test results saved.\n');
+
+end   % end of optional external test set block
