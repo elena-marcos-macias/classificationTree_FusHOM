@@ -182,6 +182,7 @@ All files are saved to `./results/` (created automatically).
 | `ROCcurves.jpg` | ROC curves for the best, median-closest, mean, and worst CV runs by AUC. |
 | `Confusion_TestSet.jpg` | Confusion matrix for the external test set predictions. |
 | `ROC_TestSet.jpg` | ROC curve for the external test set. |
+| `AUC_CV_Distribution.jpg` | Distribution of AUC values across all repeated CV runs, with vertical lines marking the mean and 95 % confidence interval boundaries. |
 
 ### Excel files
 
@@ -193,6 +194,8 @@ All files are saved to `./results/` (created automatically).
 | `PredictorImportance` | Gini importance for each predictor from the full model. |
 | `CVTreeImportance` | Importance scores from every individual CV training tree (one row per fold per run). |
 | `CVTreeSummary` | Mean, SD, median, usage rate, and value range of importance scores across all CV trees. |
+| `AUC_CI` | Mean AUC and 95 % confidence interval (2.5th and 97.5th percentiles) derived from the distribution of AUC values across all valid CV runs. |
+| `AUC_CV_Distribution` | Raw AUC value for every valid CV run. Used to compute the confidence interval and generate `AUC_CV_Distribution.jpg`. |
 
 **`testExcelFile.xlsx`** — external test set results:
 
@@ -212,6 +215,12 @@ Automatic inference of the positive class (e.g., taking the minority class) is f
 
 **Why repeated k-fold instead of a single run?**
 A single k-fold run produces a performance estimate that depends on one particular random partition. Repeating the procedure many times (e.g. 1000 runs) averages out this variance and provides a distribution of error rates and AUCs, giving a more reliable picture of model performance.
+
+**Why is class stratification not enforced in the CV partitions?**
+Forcing equal class representation in each fold would produce evaluation conditions that do not reflect the natural class distribution of the biological system under study. Since the mortality rate of the animal model may differ from 50 %, non-stratified partitions give a more realistic estimate of generalisation performance. Runs where a degenerate fold is produced (all held-out samples belonging to a single class) are detected automatically and excluded from the results, with a warning printed to the console.
+
+**Why is the external test set optional?**
+The pipeline is designed to run correctly even when no independent test set is available. If the file specified in `testDataFile` is not found in `./data/`, Section 14 is skipped with a warning rather than throwing an error. This makes the script reusable across projects regardless of whether a held-out dataset exists.
 
 ---
 
@@ -248,4 +257,4 @@ GitHub. https://github.com/elena-marcos-macias/classificationTree_FusHOM.git
 
 ---
 
-*README last updated: April 2026*
+*README last updated: May 2026*
