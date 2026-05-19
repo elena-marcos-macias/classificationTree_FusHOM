@@ -11,7 +11,7 @@
         "catVariable" : "Genotype"
      },
     "crossValidationMethods" : {
-        "nFolds" : [3],
+        "nFolds" : [4],
         "nRuns" : [1000]
     },
     "outputFileNames" : {
