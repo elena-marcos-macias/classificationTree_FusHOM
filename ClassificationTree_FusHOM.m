@@ -305,16 +305,19 @@ fprintf('Per tree : ~%d training | ~%d held-out (%.1f %% / %.1f %%)\n\n', ...
     100 * nTrain_approx / nObs, 100 * nTest_approx / nObs);
 
 % --- Preallocate storage --------------------------------------------------
-nTotalTrees = nRuns * nFolds;   % one CV training tree per fold per run
+% NaN is used as the sentinel value for skipped runs instead of 0.
+% This avoids false-positive detection of legitimate runs whose AUC
+% happens to equal exactly 0.0 (which is a valid, if rare, outcome).
+nTotalTrees = nRuns * nFolds;
 allPredictors = Mdl.PredictorNames;
 nPredictors   = numel(allPredictors);
 
-errorResults        = zeros(nRuns, 2);           % [errorRate, AUC] per run
+errorResults        = NaN(nRuns, 2);             % [errorRate, AUC] per run
 FPAll               = cell(nRuns, 1);            % FPR vectors for ROC
 TPAll               = cell(nRuns, 1);            % TPR vectors for ROC
-AUCs                = zeros(nRuns, 1);           % scalar AUC per run
+AUCs                = NaN(nRuns, 1);             % scalar AUC per run
 
-CVTreeImportanceRaw = zeros(nTotalTrees, nPredictors); % importance matrix
+CVTreeImportanceRaw = zeros(nTotalTrees, nPredictors);
 CVTreeRunID         = zeros(nTotalTrees, 1);
 CVTreeFoldID        = zeros(nTotalTrees, 1);
 CVTreeTrainSize     = zeros(nTotalTrees, 1);
@@ -365,8 +368,8 @@ for run = 1:nRuns
     % Without enforced stratification, occasional runs may produce a fold
     % where all held-out samples belong to the same class. perfcurve would
     % still compute a value but the AUC would be uninformative. Detect this
-    % condition and skip the run rather than letting it silently bias the
-    % results.
+    % condition and skip the run — its NaN sentinel values will be filtered
+    % out in the post-loop check below.
     predictedLabels = string(kfoldPredict(CVMdl));
     if numel(unique(predictedLabels)) < 2
         warning(['Run %d skipped: out-of-fold predictions contain only one class.\n' ...
@@ -422,17 +425,20 @@ for run = 1:nRuns
 end
 
 % --- Post-loop CV results check -------------------------------------------
-% Remove preallocated zero rows corresponding to skipped runs before
-% computing summary statistics. A run is considered skipped if its AUC
-% was never written (remains 0 AND errorResults row is also 0).
-skippedRuns = (AUCs == 0) & (errorResults(:,1) == 0);
-if any(skippedRuns)
+% Runs that were skipped due to degenerate folds were never written and
+% retain their NaN initialisation. Remove them before computing summaries.
+% Using NaN as the sentinel (instead of 0) avoids false-positive detection
+% of legitimate runs whose AUC happens to equal exactly 0.
+validRuns = ~isnan(AUCs);
+nSkipped  = sum(~validRuns);
+
+if nSkipped > 0
     warning('%d run(s) were skipped due to degenerate folds and excluded from results.', ...
-            sum(skippedRuns));
-    AUCs         = AUCs(~skippedRuns);
-    errorResults = errorResults(~skippedRuns, :);
-    FPAll        = FPAll(~skippedRuns);
-    TPAll        = TPAll(~skippedRuns);
+            nSkipped);
+    AUCs         = AUCs(validRuns);
+    errorResults = errorResults(validRuns, :);
+    FPAll        = FPAll(validRuns);
+    TPAll        = TPAll(validRuns);
 end
 
 if isempty(AUCs)
@@ -449,7 +455,6 @@ end
 % Update nRuns to reflect the actual number of valid runs used
 nRuns = numel(AUCs);
 fprintf('\nValid runs used for analysis: %d\n', nRuns);
-
 
 
 %% ---- 7. CV-TREE IMPORTANCE TABLES ---------------------------------------
